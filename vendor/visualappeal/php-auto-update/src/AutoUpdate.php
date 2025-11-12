@@ -440,76 +440,64 @@ class AutoUpdate {
      * @throws DownloadException
      * @throws InvalidArgumentException
      * @throws ParserException
+     * Function checkUpdate replaced by Marc Humer on Nov 12th 2025: Try/Catch instead of Throw so the main page does no longer give a Server Error 500
      */
-    public function checkUpdate(int $timeout = 10)
-    {
-        $this->log->notice('Checking for a new update...');
+public function checkUpdate(int $timeout = 10)
+{
+    $this->log->notice('Checking for a new update...');
 
-        // Reset previous updates
-        $this->latestVersion = '0.0.0';
-        $this->updates       = [];
+    $this->latestVersion = '0.0.0';
+    $this->updates       = [];
 
-        $versions = $this->cache->get('update-versions');
+    $versions = $this->cache->get('update-versions');
 
-        // Create absolute url to update file
-        $updateFile = $this->updateUrl . '/' . $this->updateFile;
-        if (!empty($this->branch)) {
-            $updateFile .= '.' . $this->branch;
-        }
+    $updateFile = $this->updateUrl . '/' . $this->updateFile;
+    if (!empty($this->branch)) {
+        $updateFile .= '.' . $this->branch;
+    }
 
-        // Check if cache is empty
+    try {
         if ($versions === null || $versions === false) {
             $this->log->debug(sprintf('Get new updates from %s', $updateFile));
 
-            // Read update file from update server
             if (function_exists('curl_version') && $this->isValidUrl($updateFile)) {
                 $update = $this->downloadCurl($updateFile, $timeout);
-
                 if ($update === false) {
                     $this->log->error(sprintf('Could not download update file "%s" via curl!', $updateFile));
-
-                    throw new DownloadException($updateFile);
+                    return false;
                 }
             } else {
                 $update = @file_get_contents($updateFile, false, $this->useBasicAuth());
-
                 if ($update === false) {
-                    $this->log->error(sprintf('Could not download update file "%s" via file_get_contents!',
-                        $updateFile));
-
-                    throw new DownloadException($updateFile);
+                    $this->log->error(sprintf('Could not download update file "%s" via file_get_contents!', $updateFile));
+                    return false;
                 }
             }
 
-            // Parse update file
             $updateFileExtension = substr(strrchr($this->updateFile, '.'), 1);
             switch ($updateFileExtension) {
                 case 'ini':
                     $versions = parse_ini_string($update, true);
                     if (!is_array($versions)) {
                         $this->log->error('Unable to parse ini update file!');
-
-                        throw new ParserException(sprintf('Could not parse update ini file %s!', $this->updateFile));
+                        return false;
                     }
-
                     $versions = array_map(static function ($block) {
                         return $block['url'] ?? false;
                     }, $versions);
-
                     break;
+
                 case 'json':
                     $versions = (array) json_decode($update, false);
                     if (!is_array($versions)) {
                         $this->log->error('Unable to parse json update file!');
-
-                        throw new ParserException(sprintf('Could not parse update json file %s!', $this->updateFile));
+                        return false;
                     }
-
                     break;
+
                 default:
                     $this->log->error(sprintf('Unknown file extension "%s"', $updateFileExtension));
-
-                    throw new ParserException(sprintf('Unknown file extension for update file %s!', $this->updateFile));
+                    return false;
             }
 
             $this->cache->set('update-versions', $versions, $this->cacheTtl);
@@ -519,9 +507,42 @@ class AutoUpdate {
 
         if (!is_array($versions)) {
             $this->log->error(sprintf('Could not read versions from server %s', $updateFile));
-
             return false;
         }
+
+        foreach ($versions as $version => $updateUrl) {
+            if (Comparator::greaterThan($version, $this->currentVersion)) {
+                if (Comparator::greaterThan($version, $this->latestVersion)) {
+                    $this->latestVersion = $version;
+                }
+                $this->updates[] = [
+                    'version' => $version,
+                    'url'     => $updateUrl,
+                ];
+            }
+        }
+
+        usort($this->updates, static function ($a, $b) {
+            if (Comparator::equalTo($a['version'], $b['version'])) {
+                return 0;
+            }
+            return Comparator::lessThan($a['version'], $b['version']) ? -1 : 1;
+        });
+
+        if ($this->newVersionAvailable()) {
+            $this->log->debug(sprintf('New version "%s" available', $this->latestVersion));
+            return true;
+        }
+
+        $this->log->debug('No new version available');
+        return self::NO_UPDATE_AVAILABLE;
+
+    } catch (\Exception $e) {
+        // Fehler nur loggen, nicht werfen
+        $this->log->warning(sprintf('Update check failed: %s', $e->getMessage()));
+        return false;
+    }
+}
 
         // Check for latest version
         foreach ($versions as $version => $updateUrl) {
